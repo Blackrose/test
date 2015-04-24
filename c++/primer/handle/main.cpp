@@ -12,6 +12,7 @@ int main(int argc, char *argv[])
     int *p = new int(1);
 
     SalesIterm test;
+    test->display();
     func(test);
 
 }

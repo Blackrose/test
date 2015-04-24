@@ -22,11 +22,17 @@ public:
         mBn = orig.mBn;
         mPrice = orig.mPrice;
     }
-
     ~SalesBase()
     {
 
     }
+    void display(void)
+    {
+        LOGFUNC;
+        cout<<"The number is "<< mBn << endl;
+        cout<<"The price is "<< mPrice << endl;
+    }
+
     virtual SalesBase* clone() const {
         return new SalesBase(*this);
     }
@@ -51,12 +57,12 @@ public:
     SalesIterm(const SalesIterm& i):p(i.p),use(i.use){ *use++; LOGFUNC;}
     ~SalesIterm(){  decrUse();  LOGFUNC;;}
     SalesIterm& operator=(const SalesIterm&);
-    const SalesBase* operator->() const
+    SalesBase* operator->() const
     {
         LOGFUNC;
         if(p) return p;
     }
-    const SalesBase  &operator*() const
+    const SalesBase& operator*() const
     {
         if(p) return *p;
     }
