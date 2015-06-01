@@ -1,0 +1,12 @@
+	1  编写 JAVA 程序
+
+	2  编译
+		javac  HelloWorld.java
+
+	3  生成 .h 头文件
+		javah HelloWorld
+
+	4  编译本地 
+
+
+
