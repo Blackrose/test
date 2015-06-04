@@ -11,8 +11,9 @@
 #include <sys/time.h>
 #include <math.h>
 #include <pthread.h>
+#include "list_tool.h"
+#include "alsa_tool.h"
 
-#include "utils.h"
 snd_pcm_t *handle_play;
 snd_pcm_t *handle_capture;
 
@@ -33,11 +34,20 @@ static snd_pcm_sframes_t period_size;/*=======================*/
 static snd_output_t *output = NULL;
 static snd_pcm_hw_params_t *hwparams;
 static snd_pcm_sw_params_t *swparams;
+
+static capture_data_ind_t cpture_data_cb;
 static pthread_t capture_thread_id;
 static pthread_t play_thread_id;
 
-BUFFER_Q  alsa_tool_play_q;
 #define FrameDataSize  910
+#define ALSA_DEBUG_LOG
+#ifdef ALSA_DEBUG_LOG
+#define ALSATLOG(arg, ...) {printf("[alsa]:"arg,##__VA_ARGS__);};
+#else
+#define ALSATLOG(arg, ...) {}
+#endif
+
+
 
 /*hard ware parameter set*/
 static int set_hwparams(snd_pcm_t *handle,snd_pcm_hw_params_t *params,snd_pcm_access_t access)
@@ -49,35 +59,35 @@ static int set_hwparams(snd_pcm_t *handle,snd_pcm_hw_params_t *params,snd_pcm_ac
 	err = snd_pcm_hw_params_any(handle, params);
 	if (err < 0) 
 	{
-		printf("Broken configuration for playback: no configurations available: %s\n", snd_strerror(err));
+		ALSATLOG("Broken configuration for playback: no configurations available: %s\n", snd_strerror(err));
 		return err;
 	}
 	/* set hardware resampling */
 	err = snd_pcm_hw_params_set_rate_resample(handle, params, resample);
 	if (err < 0) 
 	{
-		printf("Resampling setup failed for playback: %s\n", snd_strerror(err));
+		ALSATLOG("Resampling setup failed for playback: %s\n", snd_strerror(err));
 		return err;
 	}
 	/* set the interleaved read/write format */
 	err = snd_pcm_hw_params_set_access(handle, params, access);
 	if (err < 0)
 	{
-		printf("Access type not available for playback: %s\n", snd_strerror(err));
+		ALSATLOG("Access type not available for playback: %s\n", snd_strerror(err));
 		return err;
 	}
 	/* set the sample format */
 	err = snd_pcm_hw_params_set_format(handle, params, format);
 	if (err < 0) 
 	{
-		printf("Sample format not available for playback: %s\n", snd_strerror(err));
+		ALSATLOG("Sample format not available for playback: %s\n", snd_strerror(err));
 		return err;
 	}
 	/* set the count of channels */
 	err = snd_pcm_hw_params_set_channels(handle, params, channels);
 	if (err < 0)
 	{
-		printf("Channels count (%i) not available for playbacks: %s\n", channels, snd_strerror(err));
+		ALSATLOG("Channels count (%i) not available for playbacks: %s\n", channels, snd_strerror(err));
 		return err;
 	}
 	/* set the stream rate */
@@ -85,25 +95,25 @@ static int set_hwparams(snd_pcm_t *handle,snd_pcm_hw_params_t *params,snd_pcm_ac
 	err = snd_pcm_hw_params_set_rate_near(handle, params, &rrate, 0);
 	if (err < 0) 
 	{
-		printf("Rate %iHz not available for playback: %s\n", rate, snd_strerror(err));
+		ALSATLOG("Rate %iHz not available for playback: %s\n", rate, snd_strerror(err));
 		return err;
 	}
 	if (rrate != rate) 
 	{
-		printf("Rate doesn't match (requested %iHz, get %iHz)\n", rate, err);
+		ALSATLOG("Rate doesn't match (requested %iHz, get %iHz)\n", rate, err);
 		return -EINVAL;
 	}
 	/* set the buffer time */
 	err = snd_pcm_hw_params_set_buffer_time_near(handle, params, &buffer_time, &dir);
 	if (err < 0)
 	 {
-		printf("Unable to set buffer time %i for playback: %s\n", buffer_time, snd_strerror(err));
+		ALSATLOG("Unable to set buffer time %i for playback: %s\n", buffer_time, snd_strerror(err));
 		return err;
 	}
 	err = snd_pcm_hw_params_get_buffer_size(params, &size);
 	if (err < 0)
 	 {
-		printf("Unable to get buffer size for playback: %s\n", snd_strerror(err));
+		ALSATLOG("Unable to get buffer size for playback: %s\n", snd_strerror(err));
 		return err;
 	}
 	buffer_size = size;
@@ -112,23 +122,23 @@ static int set_hwparams(snd_pcm_t *handle,snd_pcm_hw_params_t *params,snd_pcm_ac
 	err = snd_pcm_hw_params_set_period_time_near(handle, params, &period_time, &dir);
 	if (err < 0)
 	 {
-		printf("Unable to set period time %i for playback: %s\n", period_time, snd_strerror(err));
+		ALSATLOG("Unable to set period time %i for playback: %s\n", period_time, snd_strerror(err));
 		return err;
 	}
 /*
 	snd_pcm_uframes_t periodsize=800;
 	 err = snd_pcm_hw_params_set_period_size(handle, params,910,0);
-	printf("period near %d   %d\r\n",dir,periodsize);
+	ALSATLOG("period near %d   %d\r\n",dir,periodsize);
 
 	if (err < 0) {
-	printf("Unable to set period size   %s\n ", snd_strerror(err));
+	ALSATLOG("Unable to set period size   %s\n ", snd_strerror(err));
 	return err;
 	}*/
 	err = snd_pcm_hw_params_get_period_size(params, &size, &dir);
-	printf("size or the period_size: %ld\r\n",size);
+	ALSATLOG("size or the period_size: %ld\r\n",size);
 	if (err < 0) 
 	{
-		printf("Unable to get period size for playback: %s\n", snd_strerror(err));
+		ALSATLOG("Unable to get period size for playback: %s\n", snd_strerror(err));
 		return err;
 	}
 	period_size = size;
@@ -136,7 +146,7 @@ static int set_hwparams(snd_pcm_t *handle,snd_pcm_hw_params_t *params,snd_pcm_ac
 	err = snd_pcm_hw_params(handle, params);
 	if (err < 0) 
 	{
-		printf("Unable to set hw params for playback: %s\n", snd_strerror(err));
+		ALSATLOG("Unable to set hw params for playback: %s\n", snd_strerror(err));
 		return err;
 	}
 	return 0;
@@ -146,11 +156,11 @@ static int set_hwparams(snd_pcm_t *handle,snd_pcm_hw_params_t *params,snd_pcm_ac
 static int xrun_recovery(snd_pcm_t *handle, int err)
 {
         if (verbose)
-                printf("stream recovery\n");
+                ALSATLOG("stream recovery\n");
         if (err == -EPIPE) {    /* under-run */
                 err = snd_pcm_prepare(handle);
                 if (err < 0)
-                        printf("Can't recovery from underrun, prepare failed: %s\n", snd_strerror(err));
+                        ALSATLOG("Can't recovery from underrun, prepare failed: %s\n", snd_strerror(err));
                 return 0;
         } else if (err == -ESTRPIPE) {
                 while ((err = snd_pcm_resume(handle)) == -EAGAIN)
@@ -158,7 +168,7 @@ static int xrun_recovery(snd_pcm_t *handle, int err)
                 if (err < 0) {
                         err = snd_pcm_prepare(handle);
                         if (err < 0)
-                                printf("Can't recovery from suspend, prepare failed: %s\n", snd_strerror(err));
+                                ALSATLOG("Can't recovery from suspend, prepare failed: %s\n", snd_strerror(err));
                 }
                 return 0;
         }
@@ -166,26 +176,32 @@ static int xrun_recovery(snd_pcm_t *handle, int err)
 }
 static void *capture_thread_main(void *arg)
 {
-   int err;
-	signed short *samples_buf;
-	samples_buf = malloc((period_size * channels * snd_pcm_format_physical_width(format)) / 8);
-	file_capture = fopen("file_capture","w");
+    int len;
+	unsigned char *samples_buf;
+	samples_buf =(unsigned char*) malloc((period_size * channels * snd_pcm_format_physical_width(format)) / 8);
+	file_capture = fopen("file_capture","wb");
 
 	if(file_capture == 0)
 	{
-		printf("err file\r\n");
+		ALSATLOG("err file\r\n");
 	}
 	while(1)
 	{
-			if ((err = snd_pcm_readi (handle_capture, samples_buf,period_size)) != period_size)
+			if ((len = snd_pcm_readi (handle_capture, samples_buf,period_size)) != period_size)
 			 {
-				fprintf (stderr, "read from audio interface failed (%s)\n",snd_strerror (err));
+				fprintf (stderr, "read from audio interface failed (%s)\n",snd_strerror (len));
 				exit (1);
 			 }
 			else
 			{	
-				//printf("capture the data\n");
+				//ALSATLOG("capture the data\n");
 				fwrite(samples_buf,2,910,file_capture);
+                if(cpture_data_cb != 0)
+                {
+                    cpture_data_cb(samples_buf, len * snd_pcm_format_physical_width(format) / 8);
+                }
+				/*send the data*/
+				
 			}		
 	}
 
@@ -203,75 +219,60 @@ int alsa_capture_start(void)
 	/*open the capture*/
 	if ((err = snd_pcm_open(&handle_capture, device,SND_PCM_STREAM_CAPTURE, 0)) < 0)
 	{
-		printf("Capture open error: %s\n", snd_strerror(err));
+		ALSATLOG("Capture open error: %s\n", snd_strerror(err));
 		return 0;
 	}
 	/* set the hard ware parameter*/
 	if ((err = set_hwparams(handle_capture, hwparams,SND_PCM_ACCESS_RW_INTERLEAVED)) < 0)
 	{
-		printf("Setting of hwparams failed: %s\n", snd_strerror(err));
+		ALSATLOG("Setting of hwparams failed: %s\n", snd_strerror(err));
 		exit(EXIT_FAILURE);
 	}
-
-	static struct timeval oldtv;
-	static struct timeval tv;
-	/*avasounil = snd_pcm_avail_update(handle);*/
-		 gettimeofday(&tv,NULL);
-  		// printf("play back time %lu\n",(tv.tv_sec-oldtv.tv_sec)*1000000+tv.tv_usec-oldtv.tv_usec);
-		 //printf("main time %u: %u \n",tv.tv_sec,tv.tv_usec);
-		 oldtv = tv;
-	/*async for capture */
+	
     int r;
     r = pthread_create(&capture_thread_id, NULL, capture_thread_main, NULL);
     if(r < 0)
     {   
-        printf("The capture thread create is fail %d\n", r);
+        ALSATLOG("The capture thread create is fail %d\n", r);
     }
-	while(1)
-	{
-
-	}
-	snd_pcm_close(handle);
+    
+//	snd_pcm_close(handle);
 	
 }
 
 
-void alsa_tool_init(void)
+void alsa_tool_init(capture_data_ind_t cd)
 {
-    snd_pcm_hw_params_alloca(&hwparams);
-    //hwparams = &hwparams_I;
-    printf("hwparams  0x%x\n",hwparams);
-	snd_pcm_sw_params_alloca(&swparams);
-	printf("Capture device is %s\n", device);
-	printf("Stream parameters are %iHz, %s, %i channels\n", rate, snd_pcm_format_name(format), channels);
-    utils_queue_init(&alsa_tool_play_q);
-    printf("swparams  0x%x\n",swparams);
-    hwparams = malloc(snd_pcm_hw_params_sizeof());
-    swparams = malloc(snd_pcm_sw_params_sizeof());
-    //printf("data  0x%x\n",data);
-
+	hwparams = (snd_pcm_hw_params_t *)malloc(snd_pcm_hw_params_sizeof());
+    swparams = (snd_pcm_sw_params_t *)malloc(snd_pcm_sw_params_sizeof());
+	ALSATLOG("Capture device is %s\n", device);
+	ALSATLOG("Stream parameters are %iHz, %s, %i channels\n", rate, snd_pcm_format_name(format), channels);
+    //ALSATLOG("data  0x%x\n",data);
+    cpture_data_cb = cd;
+    list_tool_init();
 
 }
-
 
 void* alsa_tool_thread_play(void* arg)
 {
     unsigned char* data;
     int err;
-    printf("In %s",__func__);
+    int len;
+    ALSATLOG("In %s",__func__);
     FILE *file = fopen("fileRec", "w");
     while(1)
-    {      
-        data = utils_dequeue(&alsa_tool_play_q);
+    {             
+        data = (unsigned char*)list_tool_data_get(&len);
         if(data != NULL)
         {
             err = snd_pcm_writei(handle_play, data,FrameDataSize);
+           // ALSATLOG("-------->\n");
             fwrite(data, 2 ,FrameDataSize, file);
     		if (err < 0) 
     		{	
     			if (xrun_recovery(handle_play, err) < 0) 
     			{
-    				printf("Write error: %s\n", snd_strerror(err));
+    				ALSATLOG("Write error: %s\n", snd_strerror(err));
     				exit(EXIT_FAILURE);
     			}
     			break; /* skip one period */
@@ -281,6 +282,8 @@ void* alsa_tool_thread_play(void* arg)
         }
         else
         {
+                 //ALSATLOG("-------->3\n");
+
             usleep(1);
         }
         
@@ -294,13 +297,13 @@ void* alsa_tool_thread_play(void* arg)
     /*open the playback*/
 	if ((err = snd_pcm_open(&handle_play, device,SND_PCM_STREAM_PLAYBACK, 0)) < 0)
 	{
-		printf("Capture open error: %s\n", snd_strerror(err));
+		ALSATLOG("Capture open error: %s\n", snd_strerror(err));
 		return -1;
 	}
 	/* set the hard ware parameter*/
 	if ((err = set_hwparams(handle_play,hwparams,SND_PCM_ACCESS_RW_INTERLEAVED)) < 0)
 	{
-		printf("Setting of hwparams failed: %s\n", snd_strerror(err));
+		ALSATLOG("Setting of hwparams failed: %s\n", snd_strerror(err));
 		return -2;
 	}    
 
@@ -308,7 +311,7 @@ void* alsa_tool_thread_play(void* arg)
 	result = pthread_create(&play_thread_id, NULL, alsa_tool_thread_play, NULL);
 	if(result < 0)
 	{
-	    printf(" In %s thread create fail\n", __func__);
+	    ALSATLOG(" In %s thread create fail\n", __func__);
 	}
 	else
 	{
@@ -327,15 +330,12 @@ void alsa_play_data_send(void *data, int len)
     static FILE* fileunits = NULL;
     if(fileunits == NULL)
     {
-        fileunits = fopen("fileunit","w");
+        fileunits = fopen("fileunit","wb");
         if(fileunits == NULL)
         {
             return;
         }
-    }
-    printf("data len is %d\n", len);
-//    printf("--------------->");       
-    /* malloc the buffer*/
+    }   
     if(sdata == NULL)
         sdata = (char *)malloc(FrameDataSize * 2);
 
@@ -344,57 +344,64 @@ void alsa_play_data_send(void *data, int len)
     {
         memcpy(sdata + slen, data, len);
         slen = slen + len;
-        printf("fdfs\n");
     }
     else
     {
         /*copy the data*/    
         lentcopy = FrameDataSize*2 - slen;
         memcpy(sdata + slen, data, lentcopy);
-        utils_enqueue(&alsa_tool_play_q, sdata);
+        list_tool_data_push(sdata, FrameDataSize*2);
         fwrite(sdata, 2,FrameDataSize, fileunits);
         slen = 0;
         sdata = NULL;
-        
+        usleep(1000);
         /* copy the leave data*/
         lenleave = len - lentcopy;
         if(lenleave > 0)
         {
-            
             alsa_play_data_send(data +  lentcopy ,lenleave);
         }
     }
     
 }
 
+#if 1
+
+void alsa_capture_data_int(unsigned char* data, int len)
+{
+    ALSATLOG("In %s\n", __func__);
+}
 
 int main(int argc, char* argv[])
 {
     FILE *file;
     int data_len;
-    utils_init();
+    //utils_init();
     unsigned char* 	samples_buf_play = malloc(FrameDataSize*2);
     if(argc != 2)
     {
-        printf("Please input the file\n");
+        ALSATLOG("Please input the file\n");
         return 0;
     }
     /*  */
-    file = fopen("file", "r");
-    alsa_tool_init();
+    file = fopen( argv[1], "r");
+    alsa_tool_init(alsa_capture_data_int);
     alsa_tool_play_start();
+    alsa_capture_start();
     if(file == NULL)
     {
-        printf("File open faile\n");
+        ALSATLOG("File open faile\n");
         return 0;
     }
     while(1)
     {
-        data_len = fread(samples_buf_play,2,FrameDataSize,file);
+        data_len = fread(samples_buf_play,2,24,file);
         if(data_len ==0)
         {
+            ALSATLOG("data_len is o\n");
             break;
         }
+        ALSATLOG("---------<\n");
         alsa_play_data_send(samples_buf_play, data_len*2);
     }
     while(1);
@@ -403,4 +410,6 @@ int main(int argc, char* argv[])
 
     
 }
+
+#endif
 

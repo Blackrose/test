@@ -9,12 +9,14 @@ extern "C" {
 /*
     will clreate a thread.
 */
-void alsa_capture_start(void);
-extern void alsa_capture_data_ind(unsigned char * data, unsigned int len);
+typedef void (*capture_data_ind_t)(unsigned char *data, int len);
 
-void alsa_tool_init(void);
 
-void alsa_tool_play_start(void);
+int alsa_capture_start(void);
+void alsa_capture_data_ind(unsigned char * data, unsigned int len);
+void alsa_tool_init(capture_data_ind_t cd);
+
+int  alsa_tool_play_start(void);
 void alsa_play_data_send(void *data, int len);
 
 
