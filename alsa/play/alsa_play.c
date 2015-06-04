@@ -10,11 +10,7 @@
 #include "alsa/asoundlib.h"
 #include <sys/time.h>
 #include <math.h>
-#include <pthread.h>
 
-#include "utils.h"
-snd_pcm_t *handle_play;
-snd_pcm_t *handle_capture;
 
 FILE* file_capture;
 /*if the device is default will can not register the async handler*/
@@ -31,14 +27,6 @@ static int period_event = 0; /* produce poll event after each period */
 static snd_pcm_sframes_t buffer_size;
 static snd_pcm_sframes_t period_size;/*=======================*/
 static snd_output_t *output = NULL;
-static snd_pcm_hw_params_t *hwparams;
-static snd_pcm_sw_params_t *swparams;
-static pthread_t capture_thread_id;
-static pthread_t play_thread_id;
-
-BUFFER_Q  alsa_tool_play_q;
-#define FrameDataSize  910
-
 /*hard ware parameter set*/
 static int set_hwparams(snd_pcm_t *handle,snd_pcm_hw_params_t *params,snd_pcm_access_t access)
 {
@@ -141,8 +129,78 @@ static int set_hwparams(snd_pcm_t *handle,snd_pcm_hw_params_t *params,snd_pcm_ac
 	}
 	return 0;
 }
+/*
+* Transfer method - asynchronous notification
+*/
+struct async_private_data 
+{
+	signed short *samples;
+	snd_pcm_channel_area_t *areas;
+	double phase;
+};
+static void async_callback(snd_async_handler_t *ahandler)
+{
+	snd_pcm_t *handle = snd_async_handler_get_pcm(ahandler);
+	int err;
+	signed short *samples_buf;
+	samples_buf = malloc((period_size * channels * snd_pcm_format_physical_width(format)) / 8);
+	if(file_capture == 0)
+	{
+		printf("err file\r\n");
+	}
+	static  int flag = 0;
+	static struct timeval oldtv;
+	static struct timeval tv;
+	/*avasounil = snd_pcm_avail_update(handle);*/
+	
+	if ((err = snd_pcm_readi (handle, samples_buf,period_size)) != period_size)
+	 {
+		fprintf (stderr, "read from audio interface failed (%s)\n",snd_strerror (err));
+		exit (1);
+	 }
+	
+	else
+	{	
+		if(flag == 0)
+		{ 	
+			 gettimeofday(&tv,NULL);
+	  		 printf("time  diff %lu\n",(tv.tv_sec-oldtv.tv_sec)*1000000+tv.tv_usec-oldtv.tv_usec);
+			 printf("capture time %u: %u \n",tv.tv_sec,tv.tv_usec);
+			 oldtv = tv;
+			 flag = 1;
+		}	
+			 fwrite(samples_buf,2,910,file_capture);
+	}		
+}
 
+static int async_loop(snd_pcm_t *handle)
+{
+	struct async_private_data data;
+	snd_async_handler_t *ahandler;
+	int err, count;
+	err = snd_async_add_pcm_handler(&ahandler, handle, async_callback, &data);
+	if (err < 0) 
+	{
+		printf("Unable to register async handler\n");
+		exit(EXIT_FAILURE);
+	}
+	if (snd_pcm_state(handle) == SND_PCM_STATE_PREPARED)
+	 {
+		err = snd_pcm_start(handle);
+		if (err < 0) 
+		{
+			printf("Start error: %s\n", snd_strerror(err));
+			exit(EXIT_FAILURE);
+		}
+	}	
+	file_capture = fopen("file_capture","w");
+	
+}
 
+/*
+ *   Underrun and suspend recovery
+ */
+ 
 static int xrun_recovery(snd_pcm_t *handle, int err)
 {
         if (verbose)
@@ -164,50 +222,120 @@ static int xrun_recovery(snd_pcm_t *handle, int err)
         }
         return err;
 }
-static void *capture_thread_main(void *arg)
+
+static void play_callback(snd_async_handler_t *ahandler)
 {
-   int err;
+	snd_pcm_t *handle = snd_async_handler_get_pcm(ahandler);
+	int err;
 	signed short *samples_buf;
-	samples_buf = malloc((period_size * channels * snd_pcm_format_physical_width(format)) / 8);
-	file_capture = fopen("file_capture","w");
+	//samples_buf = malloc((period_size * channels * snd_pcm_format_physical_width(format)) / 8);
+	//if(file_capture == 0)
+	//{
+	//	printf("err file\r\n");
+	//}
+	static  int flag = 0;
+	static struct timeval oldtv;
+	static struct timeval tv;
+	/*avasounil = snd_pcm_avail_update(handle);*/
 
-	if(file_capture == 0)
+	if(flag == 0)
 	{
-		printf("err file\r\n");
+		 gettimeofday(&tv,NULL);
+  		 printf("play back time diff %lu\n",(tv.tv_sec-oldtv.tv_sec)*1000000+tv.tv_usec-oldtv.tv_usec);
+		 printf("play time %u: %u \n",tv.tv_sec,tv.tv_usec);		
+		 oldtv = tv;
+		flag = 1;
 	}
-	while(1)
-	{
-			if ((err = snd_pcm_readi (handle_capture, samples_buf,period_size)) != period_size)
-			 {
-				fprintf (stderr, "read from audio interface failed (%s)\n",snd_strerror (err));
-				exit (1);
-			 }
-			else
-			{	
-				//printf("capture the data\n");
-				fwrite(samples_buf,2,910,file_capture);
-			}		
-	}
-
 }
 
-int alsa_capture_start(void)
+
+static int write_loop(snd_pcm_t *handle)
+{
+	double phase = 0;
+	signed short *ptr;
+	int err, cptr;
+	
+
+struct async_private_data data;
+	snd_async_handler_t *ahandler;
+
+	size_t data_len;
+	signed short *samples_buf_play;
+	samples_buf_play = malloc(910*2);
+
+	FILE* file_playback = fopen("file_playback","rb");
+	FILE* file_dump = fopen("file_dump","wb");
+	if(file_playback== NULL)
+	{
+		printf("file open err check the file please\r\n");
+		return 0;
+	}
+
+	
+	err = snd_async_add_pcm_handler(&ahandler, handle, play_callback, &data);
+	if (err < 0) 
+	{
+		printf("Unable to register async handler\n");
+		exit(EXIT_FAILURE);
+	}
+
+	while (1)
+	 {
+		data_len = fread(samples_buf_play,2,910,file_playback);
+		fwrite(samples_buf_play,2,data_len,file_dump);
+		if(data_len != 910)
+		{
+			printf("the data is not enough %d\r\n",data_len );
+			return 0;
+		}
+		err = snd_pcm_writei(handle, samples_buf_play,910);
+		if (err < 0) 
+		{	
+			if (xrun_recovery(handle, err) < 0) 
+			{
+				printf("Write error: %s\n", snd_strerror(err));
+				exit(EXIT_FAILURE);
+			}
+			break; /* skip one period */
+		}
+	}
+}
+int main(int argc, char *argv[])
 {
 	snd_pcm_t *handle;
+	snd_pcm_t *handle_play;
 	int err, morehelp;
-
+	snd_pcm_hw_params_t *hwparams;
+	snd_pcm_sw_params_t *swparams;
 	int method = 0;
 	signed short *samples;
 	unsigned int chn;
+	snd_pcm_hw_params_alloca(&hwparams);
+	snd_pcm_sw_params_alloca(&swparams);
+	printf("Capture device is %s\n", device);
+	printf("Stream parameters are %iHz, %s, %i channels\n", rate, snd_pcm_format_name(format), channels);
 
-	/*open the capture*/
-	if ((err = snd_pcm_open(&handle_capture, device,SND_PCM_STREAM_CAPTURE, 0)) < 0)
+	/*open the playback*/
+	if ((err = snd_pcm_open(&handle_play, device,SND_PCM_STREAM_PLAYBACK, 0)) < 0)
 	{
 		printf("Capture open error: %s\n", snd_strerror(err));
 		return 0;
 	}
 	/* set the hard ware parameter*/
-	if ((err = set_hwparams(handle_capture, hwparams,SND_PCM_ACCESS_RW_INTERLEAVED)) < 0)
+	if ((err = set_hwparams(handle_play,hwparams,SND_PCM_ACCESS_RW_INTERLEAVED)) < 0)
+	{
+		printf("Setting of hwparams failed: %s\n", snd_strerror(err));
+		exit(EXIT_FAILURE);
+	}
+
+	/*open the capture*/
+	if ((err = snd_pcm_open(&handle, device,SND_PCM_STREAM_CAPTURE, 0)) < 0)
+	{
+		printf("Capture open error: %s\n", snd_strerror(err));
+		return 0;
+	}
+	/* set the hard ware parameter*/
+	if ((err = set_hwparams(handle, hwparams,SND_PCM_ACCESS_RW_INTERLEAVED)) < 0)
 	{
 		printf("Setting of hwparams failed: %s\n", snd_strerror(err));
 		exit(EXIT_FAILURE);
@@ -218,189 +346,26 @@ int alsa_capture_start(void)
 	/*avasounil = snd_pcm_avail_update(handle);*/
 		 gettimeofday(&tv,NULL);
   		// printf("play back time %lu\n",(tv.tv_sec-oldtv.tv_sec)*1000000+tv.tv_usec-oldtv.tv_usec);
-		 //printf("main time %u: %u \n",tv.tv_sec,tv.tv_usec);
+		 printf("main time %u: %u \n",tv.tv_sec,tv.tv_usec);
 		 oldtv = tv;
 	/*async for capture */
-    int r;
-    r = pthread_create(&capture_thread_id, NULL, capture_thread_main, NULL);
-    if(r < 0)
-    {   
-        printf("The capture thread create is fail %d\n", r);
-    }
-	while(1)
+	async_loop(handle);
+	/*	*/
+	write_loop(handle_play);
+
+	/*while(1)
 	{
 
-	}
-	snd_pcm_close(handle);
-	
+	}*/
 }
 
 
-void alsa_tool_init(void)
-{
-    snd_pcm_hw_params_alloca(&hwparams);
-    //hwparams = &hwparams_I;
-    printf("hwparams  0x%x\n",hwparams);
-	snd_pcm_sw_params_alloca(&swparams);
-	printf("Capture device is %s\n", device);
-	printf("Stream parameters are %iHz, %s, %i channels\n", rate, snd_pcm_format_name(format), channels);
-    utils_queue_init(&alsa_tool_play_q);
-    printf("swparams  0x%x\n",swparams);
-    hwparams = malloc(snd_pcm_hw_params_sizeof());
-    swparams = malloc(snd_pcm_sw_params_sizeof());
-    //printf("data  0x%x\n",data);
 
 
-}
 
 
-void* alsa_tool_thread_play(void* arg)
-{
-    unsigned char* data;
-    int err;
-    printf("In %s",__func__);
-    FILE *file = fopen("fileRec", "w");
-    while(1)
-    {      
-        data = utils_dequeue(&alsa_tool_play_q);
-        if(data != NULL)
-        {
-            err = snd_pcm_writei(handle_play, data,FrameDataSize);
-            fwrite(data, 2 ,FrameDataSize, file);
-    		if (err < 0) 
-    		{	
-    			if (xrun_recovery(handle_play, err) < 0) 
-    			{
-    				printf("Write error: %s\n", snd_strerror(err));
-    				exit(EXIT_FAILURE);
-    			}
-    			break; /* skip one period */
-    		}
-    		free(data);
-    		
-        }
-        else
-        {
-            usleep(1);
-        }
-        
-    }
-}
-
- int alsa_tool_play_start(void)
-{
-    int result = 0;
-    int err;
-    /*open the playback*/
-	if ((err = snd_pcm_open(&handle_play, device,SND_PCM_STREAM_PLAYBACK, 0)) < 0)
-	{
-		printf("Capture open error: %s\n", snd_strerror(err));
-		return -1;
-	}
-	/* set the hard ware parameter*/
-	if ((err = set_hwparams(handle_play,hwparams,SND_PCM_ACCESS_RW_INTERLEAVED)) < 0)
-	{
-		printf("Setting of hwparams failed: %s\n", snd_strerror(err));
-		return -2;
-	}    
-
-	/*create the play thread*/
-	result = pthread_create(&play_thread_id, NULL, alsa_tool_thread_play, NULL);
-	if(result < 0)
-	{
-	    printf(" In %s thread create fail\n", __func__);
-	}
-	else
-	{
-	    return -3;
-	}
-	return result;
-	
-}
-void alsa_play_data_send(void *data, int len)
-{
-    static unsigned char *sdata = NULL;
-    static int slen = 0;
-    
-    int lenleave;
-    int lentcopy;
-    static FILE* fileunits = NULL;
-    if(fileunits == NULL)
-    {
-        fileunits = fopen("fileunit","w");
-        if(fileunits == NULL)
-        {
-            return;
-        }
-    }
-    printf("data len is %d\n", len);
-//    printf("--------------->");       
-    /* malloc the buffer*/
-    if(sdata == NULL)
-        sdata = (char *)malloc(FrameDataSize * 2);
-
-    /* < 910*/    
-    if((slen + len)  < FrameDataSize*2)
-    {
-        memcpy(sdata + slen, data, len);
-        slen = slen + len;
-        printf("fdfs\n");
-    }
-    else
-    {
-        /*copy the data*/    
-        lentcopy = FrameDataSize*2 - slen;
-        memcpy(sdata + slen, data, lentcopy);
-        utils_enqueue(&alsa_tool_play_q, sdata);
-        fwrite(sdata, 2,FrameDataSize, fileunits);
-        slen = 0;
-        sdata = NULL;
-        
-        /* copy the leave data*/
-        lenleave = len - lentcopy;
-        if(lenleave > 0)
-        {
-            
-            alsa_play_data_send(data +  lentcopy ,lenleave);
-        }
-    }
-    
-}
 
 
-int main(int argc, char* argv[])
-{
-    FILE *file;
-    int data_len;
-    utils_init();
-    unsigned char* 	samples_buf_play = malloc(FrameDataSize*2);
-    if(argc != 2)
-    {
-        printf("Please input the file\n");
-        return 0;
-    }
-    /*  */
-    file = fopen("file", "r");
-    alsa_tool_init();
-    alsa_tool_play_start();
-    if(file == NULL)
-    {
-        printf("File open faile\n");
-        return 0;
-    }
-    while(1)
-    {
-        data_len = fread(samples_buf_play,2,FrameDataSize,file);
-        if(data_len ==0)
-        {
-            break;
-        }
-        alsa_play_data_send(samples_buf_play, data_len*2);
-    }
-    while(1);
-    
-    
 
-    
-}
+
 
